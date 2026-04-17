@@ -35,6 +35,8 @@ export class Config {
   public whisperInstallPath: string;
   public videosDirPath: string;
   public tempDirPath: string;
+  public videosSourceDirPath: string;
+  public clipsDirPath: string;
   public packageDirPath: string;
   public musicDirPath: string;
   public pexelsApiKey: string;
@@ -69,6 +71,12 @@ export class Config {
     fs.ensureDirSync(this.libsDirPath);
     fs.ensureDirSync(this.videosDirPath);
     fs.ensureDirSync(this.tempDirPath);
+
+    this.videosSourceDirPath = path.join(this.dataDirPath, "videos-source");
+    fs.ensureDirSync(this.videosSourceDirPath);
+
+    this.clipsDirPath = path.join(this.dataDirPath, "clips");
+    fs.ensureDirSync(this.clipsDirPath);
 
     this.packageDirPath = path.join(__dirname, "..");
     this.staticDirPath = path.join(this.packageDirPath, "static");

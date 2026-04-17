@@ -1,4 +1,9 @@
-import { createShortInput, CreateShortInput } from "../types/shorts";
+import {
+  createShortInput,
+  CreateShortInput,
+  localVideoClipInput,
+  LocalVideoClipInput,
+} from "../types/shorts";
 import { logger } from "../logger";
 import { ZodError } from "zod";
 
@@ -16,6 +21,24 @@ export function validateCreateShortInput(input: object): CreateShortInput {
   }
 
   // Process the validation errors
+  const errorResult = formatZodError(validated.error);
+
+  throw new Error(
+    JSON.stringify({
+      message: errorResult.message,
+      missingFields: errorResult.missingFields,
+    }),
+  );
+}
+
+export function validateLocalVideoClipInput(input: object): LocalVideoClipInput {
+  const validated = localVideoClipInput.safeParse(input);
+  logger.info({ validated }, "Validated local video clip input");
+
+  if (validated.success) {
+    return validated.data;
+  }
+
   const errorResult = formatZodError(validated.error);
 
   throw new Error(

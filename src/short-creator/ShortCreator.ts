@@ -22,7 +22,18 @@ import type {
   MusicMoodEnum,
   MusicTag,
   MusicForVideo,
+  LocalVideoClip,
+  LocalVideoFile,
 } from "../types/shorts";
+
+const SUPPORTED_LOCAL_VIDEO_EXTENSIONS = new Set([
+  ".mp4",
+  ".mov",
+  ".m4v",
+  ".mkv",
+  ".webm",
+  ".avi",
+]);
 
 export class ShortCreator {
   private queue: {
@@ -100,7 +111,6 @@ export class ShortCreator {
     );
     const scenes: Scene[] = [];
     let totalDuration = 0;
-    const excludeVideoIds = [];
     const tempFiles = [];
 
     const orientation: OrientationEnum =
@@ -115,7 +125,6 @@ export class ShortCreator {
       let { audioLength } = audio;
       const { audio: audioStream } = audio;
 
-      // add the paddingBack in seconds to the last scene
       if (index + 1 === inputScenes.length && config.paddingBack) {
         audioLength += config.paddingBack / 1000;
       }
@@ -137,53 +146,27 @@ export class ShortCreator {
       const captions = await this.whisper.CreateCaption(tempWavPath);
 
       await this.ffmpeg.saveToMp3(audioStream, tempMp3Path);
-      const video = await this.pexelsApi.findVideo(
-        scene.searchTerms,
-        audioLength,
-        excludeVideoIds,
-        orientation,
+
+      const videoDuration = await this.ffmpeg.getVideoDuration(scene.videoPath);
+      const trimDuration = Math.min(audioLength, videoDuration);
+
+      await this.ffmpeg.extractClip(
+        scene.videoPath,
+        tempVideoPath,
+        0,
+        trimDuration,
       );
-
-      logger.debug(`Downloading video from ${video.url} to ${tempVideoPath}`);
-
-      await new Promise<void>((resolve, reject) => {
-        const fileStream = fs.createWriteStream(tempVideoPath);
-        https
-          .get(video.url, (response: http.IncomingMessage) => {
-            if (response.statusCode !== 200) {
-              reject(
-                new Error(`Failed to download video: ${response.statusCode}`),
-              );
-              return;
-            }
-
-            response.pipe(fileStream);
-
-            fileStream.on("finish", () => {
-              fileStream.close();
-              logger.debug(`Video downloaded successfully to ${tempVideoPath}`);
-              resolve();
-            });
-          })
-          .on("error", (err: Error) => {
-            fs.unlink(tempVideoPath, () => {}); // Delete the file if download failed
-            logger.error(err, "Error downloading video:");
-            reject(err);
-          });
-      });
-
-      excludeVideoIds.push(video.id);
 
       scenes.push({
         captions,
         video: `http://localhost:${this.config.port}/api/tmp/${tempVideoFileName}`,
         audio: {
           url: `http://localhost:${this.config.port}/api/tmp/${tempMp3FileName}`,
-          duration: audioLength,
+          duration: trimDuration,
         },
       });
 
-      totalDuration += audioLength;
+      totalDuration += trimDuration;
       index++;
     }
     if (config.paddingBack) {
@@ -222,6 +205,10 @@ export class ShortCreator {
     return path.join(this.config.videosDirPath, `${videoId}.mp4`);
   }
 
+  public getClipPath(clipId: string): string {
+    return path.join(this.config.clipsDirPath, `${clipId}.mp4`);
+  }
+
   public deleteVideo(videoId: string): void {
     const videoPath = this.getVideoPath(videoId);
     fs.removeSync(videoPath);
@@ -230,10 +217,14 @@ export class ShortCreator {
 
   public getVideo(videoId: string): Buffer {
     const videoPath = this.getVideoPath(videoId);
-    if (!fs.existsSync(videoPath)) {
-      throw new Error(`Video ${videoId} not found`);
+    if (fs.existsSync(videoPath)) {
+      return fs.readFileSync(videoPath);
     }
-    return fs.readFileSync(videoPath);
+    const clipPath = this.getClipPath(videoId);
+    if (fs.existsSync(clipPath)) {
+      return fs.readFileSync(clipPath);
+    }
+    throw new Error(`Video ${videoId} not found`);
   }
 
   private findMusic(videoDuration: number, tag?: MusicMoodEnum): MusicForVideo {
@@ -293,5 +284,99 @@ export class ShortCreator {
 
   public ListAvailableVoices(): string[] {
     return this.kokoro.listAvailableVoices();
+  }
+
+  public listLocalVideoFiles(folderPath: string): LocalVideoFile[] {
+    if (!fs.existsSync(folderPath)) {
+      throw new Error("Folder does not exist");
+    }
+
+    const stats = fs.statSync(folderPath);
+    if (!stats.isDirectory()) {
+      throw new Error("The provided path is not a folder");
+    }
+
+    return fs
+      .readdirSync(folderPath)
+      .sort((left, right) => left.localeCompare(right))
+      .map((fileName) => {
+        const filePath = path.join(folderPath, fileName);
+        return {
+          fileName,
+          filePath,
+          stats: fs.statSync(filePath),
+        };
+      })
+      .filter(({ fileName, stats }) => {
+        return (
+          stats.isFile() &&
+          SUPPORTED_LOCAL_VIDEO_EXTENSIONS.has(path.extname(fileName).toLowerCase())
+        );
+      })
+      .map(({ fileName, filePath, stats }) => ({
+        fileName,
+        path: filePath,
+        sizeBytes: stats.size,
+      }));
+  }
+
+  public async createLocalVideoClips(
+    folderPath: string,
+    fileName: string,
+    clipCount: number,
+    clipDurationSeconds: number,
+    clipName?: string | null,
+  ): Promise<{
+    sourceFileName: string;
+    durationSeconds: number;
+    clips: LocalVideoClip[];
+  }> {
+    const files = this.listLocalVideoFiles(folderPath);
+    const sourceFile = files.find((file) => file.fileName === fileName);
+
+    if (!sourceFile) {
+      throw new Error("Video file not found in the selected folder");
+    }
+
+    const durationSeconds = await this.ffmpeg.getVideoDuration(sourceFile.path);
+    if (durationSeconds < clipDurationSeconds) {
+      throw new Error(
+        `Video is shorter than ${clipDurationSeconds} seconds and cannot be clipped`,
+      );
+    }
+
+    const maxStartSeconds = Math.max(durationSeconds - clipDurationSeconds, 0);
+    const step = clipCount === 1 ? 0 : maxStartSeconds / (clipCount - 1);
+    const clips: LocalVideoClip[] = [];
+
+    for (let index = 0; index < clipCount; index++) {
+      const clipId = cuid();
+      const clipFileName = clipName ? `${clipName}${index + 1}.mp4` : `${clipId}.mp4`;
+      const outputPath = path.join(this.config.clipsDirPath, clipFileName);
+      const rawStartSeconds = step * index;
+      const startSeconds = Number(
+        Math.min(rawStartSeconds, maxStartSeconds).toFixed(2),
+      );
+
+      await this.ffmpeg.extractClip(
+        sourceFile.path,
+        outputPath,
+        startSeconds,
+        clipDurationSeconds,
+      );
+
+      clips.push({
+        id: clipId,
+        fileName: clipFileName,
+        startSeconds,
+        durationSeconds: clipDurationSeconds,
+      });
+    }
+
+    return {
+      sourceFileName: sourceFile.fileName,
+      durationSeconds,
+      clips,
+    };
   }
 }

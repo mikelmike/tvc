@@ -1,11 +1,15 @@
 import ffmpeg from "fluent-ffmpeg";
+import { spawn } from "node:child_process";
 import { Readable } from "node:stream";
 import { logger } from "../../logger";
+
+let ffmpegBinaryPath = "";
 
 export class FFMpeg {
   static async init(): Promise<FFMpeg> {
     return import("@ffmpeg-installer/ffmpeg").then((ffmpegInstaller) => {
       ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+      ffmpegBinaryPath = ffmpegInstaller.path;
       logger.info("FFmpeg path set to:", ffmpegInstaller.path);
       return new FFMpeg();
     });
@@ -88,6 +92,63 @@ export class FFMpeg {
         .on("error", (err) => {
           reject(err);
         });
+    });
+  }
+
+  async getVideoDuration(filePath: string): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const process = spawn(ffmpegBinaryPath, ["-i", filePath], {
+        windowsHide: true,
+      });
+      let stderr = "";
+
+      process.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+
+      process.on("error", (error) => {
+        logger.error(error, "Error reading video metadata");
+        reject(error);
+      });
+
+      process.on("close", () => {
+        const match = stderr.match(/Duration:\s(\d+):(\d+):(\d+(?:\.\d+)?)/);
+        if (!match) {
+          reject(new Error("Unable to determine video duration"));
+          return;
+        }
+
+        const hours = Number(match[1]);
+        const minutes = Number(match[2]);
+        const seconds = Number(match[3]);
+
+        resolve(hours * 3600 + minutes * 60 + seconds);
+      });
+    });
+  }
+
+  async extractClip(
+    inputPath: string,
+    outputPath: string,
+    startSeconds: number,
+    durationSeconds: number,
+  ): Promise<string> {
+    return new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        .setStartTime(startSeconds)
+        .duration(durationSeconds)
+        .outputOptions(["-movflags +faststart"])
+        .videoCodec("libx264")
+        .audioCodec("aac")
+        .on("end", () => {
+          logger.debug({ outputPath, startSeconds, durationSeconds }, "Clip created");
+          resolve(outputPath);
+        })
+        .on("error", (error: unknown) => {
+          logger.error(error, "Error creating clip");
+          reject(error);
+        })
+        .save(outputPath);
     });
   }
 }

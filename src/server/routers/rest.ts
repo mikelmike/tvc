@@ -5,8 +5,12 @@ import type {
 } from "express";
 import fs from "fs-extra";
 import path from "path";
+import multer from "multer";
 
-import { validateCreateShortInput } from "../validator";
+import {
+  validateCreateShortInput,
+  validateLocalVideoClipInput,
+} from "../validator";
 import { ShortCreator } from "../../short-creator/ShortCreator";
 import { logger } from "../../logger";
 import { Config } from "../../config";
@@ -28,6 +32,40 @@ export class APIRouter {
   }
 
   private setupRoutes() {
+    const videosSourceDirPath = this.config.videosSourceDirPath;
+    const upload = multer({
+      storage: multer.diskStorage({
+        destination: (_req, _file, callback) => {
+          callback(null, videosSourceDirPath);
+        },
+        filename: (_req, file, callback) => {
+          const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+          callback(null, `${Date.now()}-${sanitizedName}`);
+        },
+      }),
+      fileFilter: (_req, file, callback) => {
+        const extension = path.extname(file.originalname).toLowerCase();
+        const supportedExtensions = new Set([
+          ".mp4",
+          ".mov",
+          ".m4v",
+          ".mkv",
+          ".webm",
+          ".avi",
+        ]);
+
+        if (supportedExtensions.has(extension)) {
+          callback(null, true);
+          return;
+        }
+
+        callback(new Error("Unsupported video file type"));
+      },
+      limits: {
+        fileSize: 1024 * 1024 * 1024,
+      },
+    });
+
     this.router.post(
       "/short-video",
       async (req: ExpressRequest, res: ExpressResponse) => {
@@ -72,6 +110,94 @@ export class APIRouter {
     );
 
     this.router.get(
+      "/local-video-files",
+      (req: ExpressRequest, res: ExpressResponse) => {
+        const folderPath = req.query.folderPath;
+
+        if (typeof folderPath !== "string" || folderPath.trim().length === 0) {
+          res.status(400).json({
+            error: "folderPath is required",
+          });
+          return;
+        }
+
+        try {
+          const files = this.shortCreator.listLocalVideoFiles(folderPath.trim());
+          res.status(200).json({ files });
+        } catch (error: unknown) {
+          logger.error(error, "Error listing local video files");
+          res.status(400).json({
+            error: "Unable to list local video files",
+            message: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      },
+    );
+
+    this.router.post(
+      "/upload-local-video",
+      upload.single("video"),
+      (req: ExpressRequest, res: ExpressResponse) => {
+        const uploadedFile = req.file;
+
+        if (!uploadedFile) {
+          res.status(400).json({
+            error: "video file is required",
+          });
+          return;
+        }
+
+        res.status(201).json({
+          file: {
+            fileName: uploadedFile.filename,
+            path: uploadedFile.path,
+            sizeBytes: uploadedFile.size,
+          },
+          folderPath: videosSourceDirPath,
+        });
+      },
+    );
+
+    this.router.post(
+      "/local-video-clips",
+      async (req: ExpressRequest, res: ExpressResponse) => {
+        try {
+          const input = validateLocalVideoClipInput(req.body);
+          const result = await this.shortCreator.createLocalVideoClips(
+            input.folderPath,
+            input.fileName,
+            input.clipCount,
+            input.clipDurationSeconds,
+            input.clipName,
+          );
+
+          res.status(201).json(result);
+        } catch (error: unknown) {
+          logger.error(error, "Error creating local video clips");
+
+          if (error instanceof Error && error.message.startsWith("{")) {
+            try {
+              const errorData = JSON.parse(error.message);
+              res.status(400).json({
+                error: "Validation failed",
+                message: errorData.message,
+                missingFields: errorData.missingFields,
+              });
+              return;
+            } catch (parseError: unknown) {
+              logger.error(parseError, "Error parsing validation error");
+            }
+          }
+
+          res.status(400).json({
+            error: "Unable to create clips",
+            message: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      },
+    );
+
+    this.router.get(
       "/short-video/:videoId/status",
       async (req: ExpressRequest, res: ExpressResponse) => {
         const { videoId } = req.params;
@@ -97,6 +223,38 @@ export class APIRouter {
 
     this.router.get("/voices", (req: ExpressRequest, res: ExpressResponse) => {
       res.status(200).json(this.shortCreator.ListAvailableVoices());
+    });
+
+    this.router.get("/videos-source-path", (req: ExpressRequest, res: ExpressResponse) => {
+      res.status(200).json({ path: this.config.videosSourceDirPath });
+    });
+
+    this.router.get("/clips-path", (req: ExpressRequest, res: ExpressResponse) => {
+      res.status(200).json({ path: this.config.clipsDirPath });
+    });
+
+    this.router.get("/uploaded-videos", (req: ExpressRequest, res: ExpressResponse) => {
+      try {
+        const files = this.shortCreator.listLocalVideoFiles(this.config.videosSourceDirPath);
+        res.status(200).json({ files });
+      } catch (error: unknown) {
+        res.status(400).json({
+          error: "Unable to list videos",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    });
+
+    this.router.get("/clips-videos", (req: ExpressRequest, res: ExpressResponse) => {
+      try {
+        const files = this.shortCreator.listLocalVideoFiles(this.config.clipsDirPath);
+        res.status(200).json({ files });
+      } catch (error: unknown) {
+        res.status(400).json({
+          error: "Unable to list clips",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
     });
 
     this.router.get(

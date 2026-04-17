@@ -31,12 +31,10 @@ export type Scene = {
 };
 
 export const sceneInput = z.object({
-  text: z.string().describe("Text to be spoken in the video"),
-  searchTerms: z
-    .array(z.string())
-    .describe(
-      "Search term for video, 1 word, and at least 2-3 search terms should be provided for each scene. Make sure to match the overall context with the word - regardless what the video search result would be.",
-    ),
+  text: z.string().describe("Text to be spoken in the scene"),
+  videoPath: z
+    .string()
+    .describe("Path to the local video file for this scene"),
 });
 export type SceneInput = z.infer<typeof sceneInput>;
 
@@ -116,6 +114,13 @@ export const renderConfig = z.object({
     .nativeEnum(MusicVolumeEnum)
     .optional()
     .describe("Volume of the music, default is high"),
+  clipDurationSeconds: z
+    .number()
+    .int()
+    .min(5)
+    .max(50)
+    .optional()
+    .describe("Duration of each video clip in seconds, between 5 and 50, default is 10"),
 });
 export type RenderConfig = z.infer<typeof renderConfig>;
 
@@ -147,6 +152,28 @@ export const createShortInput = z.object({
   config: renderConfig.describe("Configuration for rendering the video"),
 });
 export type CreateShortInput = z.infer<typeof createShortInput>;
+
+export const localVideoClipInput = z.object({
+  folderPath: z.string().min(1),
+  fileName: z.string().min(1),
+  clipCount: z.number().int().min(3).max(4).default(4),
+  clipDurationSeconds: z.number().int().min(5).max(50).default(10),
+  clipName: z.string().optional().nullable(),
+});
+export type LocalVideoClipInput = z.infer<typeof localVideoClipInput>;
+
+export type LocalVideoFile = {
+  fileName: string;
+  path: string;
+  sizeBytes: number;
+};
+
+export type LocalVideoClip = {
+  id: string;
+  fileName: string;
+  startSeconds: number;
+  durationSeconds: number;
+};
 
 export type VideoStatus = "processing" | "ready" | "failed";
 
